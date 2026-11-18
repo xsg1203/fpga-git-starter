@@ -33,7 +33,24 @@ Vivado 2017.4，Part `xc7z010clg400-1`，PL 时钟 50MHz（N18）。
 ## 仓库
 
 - 远端：<https://github.com/xsg1203/fpga-git-starter>
-- 推送：`./scripts/push.sh`（本机 TLS 异常时用 `./scripts/push.sh --insecure-tls`）
+- SSH：`git@github.com:xsg1203/fpga-git-starter.git`（**推荐**，origin 已配置为此地址）
+- 推送：`./scripts/push.sh`
+- HTTPS 备用：`./scripts/push.sh --https`；若本机 TLS 取不到吊销列表再加 `--insecure-tls`
+
+### 为什么用 SSH
+
+本机 22 端口被拒（`Connection refused`），`~/.ssh/config` 已将 `github.com` 指向 GitHub 官方 443 接入点：
+
+```
+Host github.com
+    HostName ssh.github.com
+    Port 443
+    User git
+    IdentityFile ~/.ssh/id_ed25519_github
+    IdentitiesOnly yes
+```
+
+SSH 不经过 TLS 握手，因此不会触发 Windows schannel 的 `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)`；同时也免去了每次推送输入 PAT。验证命令：`ssh -T git@github.com`，应返回 `Hi xsg1203!`。
 
 ## 版本策略
 
