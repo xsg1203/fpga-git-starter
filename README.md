@@ -30,6 +30,18 @@ scripts/    建工程、综合、仿真脚本
 
 Vivado 2017.4，Part `xc7z010clg400-1`，PL 时钟 50MHz（N18）。
 
+## 仓库
+
+- 远端：<https://github.com/xsg1203/fpga-git-starter>
+- 推送：`./scripts/push.sh`（本机 TLS 异常时用 `./scripts/push.sh --insecure-tls`）
+
 ## 版本策略
 
 每个里程碑一个 commit + tag，详见需求规格书 §8。
+
+| tag | 内容 |
+|---|---|
+| `v0.1-spec` | 需求规格书、工程骨架 |
+| `v0.2-m2` | 架构文档 + M2 采集直显（OV5640 → 320×240 帧缓存 → VGA） |
+
+回档到某个里程碑：`git checkout v0.2-m2`（或 `git switch -c tmp v0.2-m2` 另开分支查看）。
