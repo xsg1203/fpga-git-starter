@@ -29,15 +29,17 @@ HTTPS_URL="https://github.com/xsg1203/fpga-git-starter.git"
 
 if [ "$MODE" = "ssh" ]; then
     URL="$SSH_URL"
-    # 预检：SSH 认证不通就直接报错，不用等 git 超时
-    if ! ssh -T -o BatchMode=yes -o ConnectTimeout=10 git@github.com >/dev/null 2>&1; then
-        # GitHub 认证成功时返回 1（不支持 shell），连接失败才需要真的退出
-        if ! ssh -o BatchMode=yes -o ConnectTimeout=10 git@github.com 2>&1 | grep -q "successfully authenticated"; then
-            echo "[错误] SSH 认证失败。检查 ~/.ssh/id_ed25519_github 是否已添加到 GitHub，"
-            echo "       以及 ~/.ssh/config 中 github.com 是否指向 ssh.github.com:443。"
-            exit 1
-        fi
+    # 预检：SSH 认证不通就直接报错，不用等 git 超时。
+    # 注意 GitHub 的 ssh -T 认证成功时退出码是 1（不开 shell），故不能只看退出码。
+    OUT="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 git@github.com 2>&1 || true)"
+    if ! printf '%s' "$OUT" | grep -q "successfully authenticated"; then
+        echo "[错误] SSH 认证失败："
+        printf '%s\n' "$OUT" | head -3
+        echo "       检查 ~/.ssh/id_ed25519_github 是否已添加到 GitHub，"
+        echo "       以及 ~/.ssh/config 中 github.com 是否指向 ssh.github.com:443。"
+        exit 1
     fi
+    echo "[SSH] $(printf '%s' "$OUT" | head -1)"
 else
     URL="$HTTPS_URL"
     if [ "$INSECURE" = "1" ]; then
