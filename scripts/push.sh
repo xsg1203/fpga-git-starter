@@ -48,7 +48,14 @@ else
     fi
 fi
 
-echo "[推送] $URL"
-git push "$URL" main
-git push "$URL" --tags
+if [ "$MODE" = "ssh" ]; then
+    # origin 本身即 SSH 地址，用 remote 名推送可同时刷新 origin/main 追踪引用
+    echo "[推送] origin ($URL)"
+    git push origin main
+    git push origin --tags
+else
+    echo "[推送] $URL"
+    git push "$URL" main
+    git push "$URL" --tags
+fi
 echo "[完成] 已推送 main 与全部 tag"
