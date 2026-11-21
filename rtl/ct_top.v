@@ -10,16 +10,20 @@
 //
 // LED 上电自检（低电平点亮，扩展板 LED0~LED3）：
 //   LED0 亮 = MMCM 锁定
-//   LED1 亮 = OV5640 SCCB 配置完成
-//   LED2 亮 = 已收到 VSYNC（摄像头正在出图）
-//   LED3 亮 = SCCB 出现过无 ACK（应保持熄灭）
+//   LED1 亮 = OV5640 SCCB 写序列走完
+//   LED2 亮 = 采到过 VSYNC 上升沿（注意：此灯不可作为证据，见下）
+//   LED3 亮 = SCCB 写过程中出现过 NACK
 //
-// 【M2 显示策略】画面内容有三种可能，用来把"黑屏"拆成可判定状态：
-//   1) 出摄像头实时画面                -> 采集链路与显示链路都正常
-//   2) FPGA 内部彩条 + LED2 灭         -> 没有 VSYNC：XCLK/供电/复位/SCCB 失败
-//   3) FPGA 内部彩条 + LED2 亮         -> 有同步但无有效像素：窗口/格式/曝光配置错
-//   彩条在"连续 1 秒没有写进非零像素"时自动接管，出图后立即切回摄像头。
-//   所以上板再也不会只看到纯黑：至少能立刻知道问题在摄像头侧还是显示侧。
+// 【LED2 为什么不能当证据】
+//   若传感器把 DVP 引脚设为输入（0x3017=0x00），FPGA 侧 K17 悬空，
+//   噪声边沿同样会置位 vs_seen。所以"LED2 亮"只证明 E19 上有边沿，
+//   不证明信号来自摄像头。真正的判据是"有没有写进非零像素"。
+//
+// 【M2 显示策略】
+//   没有有效画面时，屏幕上显示自检面板（diag_osd），而不是纯黑或纯彩条：
+//     - 4 行寄存器回读（PID/PAD/电源），绿=相符 红=不符 黄=未读回
+//     - 1 行链路状态（SCCB自检 / PCLK / HREF / 非零像素）
+//   出图后自动切回摄像头实时画面。
 //==========================================================================
 `timescale 1ns / 1ps
 
@@ -29,7 +33,7 @@ module ct_top (
     output wire [3:0]  led_n,
 
     //---------------- OV5640 ----------------
-    output wire        ov_xclk,      // F20, 25MHz
+    output wire        ov_xclk,      // F20, 24MHz
     output wire        ov_rst_n,     // A20, 低有效
     output wire        ov_pwdn,      // H16, 高=掉电
     output wire        ov_scl,       // J18
@@ -53,7 +57,6 @@ module ct_top (
     reg  por_rst;
     reg  [15:0] por_cnt;
 
-    // MMCM 复位：先拉高，锁定前一直保持
     always @(posedge clk50) begin
         if (por_cnt != 16'hFFFF) begin
             por_cnt <= por_cnt + 16'd1;
@@ -101,23 +104,26 @@ module ct_top (
     end
 
     //======================================================================
-    // SCCB 配置
+    // SCCB 写配置
     //======================================================================
     wire       sccb_go, sccb_busy, sccb_done, sccb_ackerr;
-    wire       scl_lo, sda_lo;
+    wire       scl_lo_wr, sda_lo_wr;
     wire [15:0] cfg_reg;                  // OV5640 寄存器地址为 16 位
     wire [7:0]  cfg_dat, cfg_err_cnt;
     wire       cfg_done;
 
-    i2c_sccb #(.DIV(8'd64)) u_sccb (
+    // DIV 由 64 放慢到 128：SCL 约 97.6kHz。
+    // 教学扩展板通常没有 I2C 上拉，靠 FPGA 内部弱上拉（约 20kΩ），
+    // 上升沿较慢，100kHz 比 200kHz 稳定得多。
+    i2c_sccb #(.DIV(8'd128)) u_sccb (
         .clk     (clk50),
         .rst_n   (cfg_rst_n),
         .go      (sccb_go),
         .dev_a   (8'h78),
         .reg_a   (cfg_reg),
         .wdat    (cfg_dat),
-        .scl_lo  (scl_lo),
-        .sda_lo  (sda_lo),
+        .scl_lo  (scl_lo_wr),
+        .sda_lo  (sda_lo_wr),
         .sda_i   (ov_sda),
         .busy    (sccb_busy),
         .ack_err (sccb_ackerr),
@@ -137,9 +143,75 @@ module ct_top (
         .err_cnt  (cfg_err_cnt)
     );
 
-    assign ov_scl  = scl_lo ? 1'b0 : 1'bz;
-    assign ov_sda  = sda_lo ? 1'b0 : 1'bz;
-    assign ov_xclk = clk_xclk;       // 24MHz（硬件说明 F20 标注 24MHz）
+    //======================================================================
+    // SCCB 回读自检（配置完成后执行一次）
+    //
+    // 写操作无法自证：从机对每个字节都回 ACK，写错了也看不出来。
+    // 唯一能自证的是读回已知常量 —— OV5640 的 PID 固定为 0x5640。
+    //======================================================================
+    wire        rd_go, rd_busy, rd_ackerr, rd_done;
+    wire [7:0]  rd_dat;
+    wire [15:0] rd_reg;
+    wire        scl_lo_rd, sda_lo_rd;
+
+    reg         cfg_done_d, rb_started;
+    always @(posedge clk50 or negedge rst_n50) begin
+        if (!rst_n50) begin
+            cfg_done_d <= 1'b0;
+            rb_started <= 1'b0;
+        end else begin
+            cfg_done_d <= cfg_done;
+            if (cfg_done && !cfg_done_d) rb_started <= 1'b1;
+        end
+    end
+    wire rb_start = cfg_done && !cfg_done_d && !rb_started;
+
+    // 回读值由子模块输出，父层必须是 wire（Verilog-2001 不允许把 output 接到 reg）
+    wire [7:0]  v_pidh, v_pidl, v_pad, v_pwr;
+    wire [3:0]  rb_ok;
+    wire        rb_bad, rb_fin;
+
+    sccb_rd #(.DIV(8'd128)) u_sccb_rd (
+        .clk     (clk50),
+        .rst_n   (cfg_rst_n),
+        .go      (rd_go),
+        .dev_a   (8'h78),
+        .reg_a   (rd_reg),
+        .scl_lo  (scl_lo_rd),
+        .sda_lo  (sda_lo_rd),
+        .sda_i   (ov_sda),
+        .busy    (rd_busy),
+        .ack_err (rd_ackerr),
+        .rdat    (rd_dat),
+        .done    (rd_done)
+    );
+
+    ov5640_readback u_rb (
+        .clk     (clk50),
+        .rst_n   (cfg_rst_n),
+        .start   (rb_start),
+        .go      (rd_go),
+        .reg_a   (rd_reg),
+        .busy    (rd_busy),
+        .ack_err (rd_ackerr),
+        .done    (rd_done),
+        .rdat    (rd_dat),
+        .v_pidh  (v_pidh),
+        .v_pidl  (v_pidl),
+        .v_pad   (v_pad),
+        .v_pwr   (v_pwr),
+        .ok      (rb_ok),
+        .bad     (rb_bad),
+        .fin     (rb_fin)
+    );
+
+    // 两条通路共用总线；读只在写完成之后进行，不会冲突
+    wire scl_lo = scl_lo_wr | scl_lo_rd;
+    wire sda_lo = sda_lo_wr | sda_lo_rd;
+
+    assign ov_scl   = scl_lo ? 1'b0 : 1'bz;
+    assign ov_sda   = sda_lo ? 1'b0 : 1'bz;
+    assign ov_xclk  = clk_xclk;      // 24MHz（硬件说明 F20 标注 24MHz）
     assign ov_rst_n = rst_n50;
     assign ov_pwdn  = 1'b0;
 
@@ -172,46 +244,70 @@ module ct_top (
     wire [17:0] wr_addr18 = ({9'd0, wrow} << 8) + ({9'd0, wrow} << 6) + {9'd0, wcol};
 
     //======================================================================
-    // 摄像头"真的在出图"的判定（pclk 域 -> clk_pix 域）
+    // "摄像头真的在出图"的判定（pclk 域 -> clk_pix 域）
     //
-    // 判据不是"收到 VSYNC"，而是"这一帧里写进了非零像素"。
-    // 原因是 VSYNC 正常但像素全 0 也是一种典型故障（曝光上限被压低、
-    // 输出格式错），此时屏幕同样是黑的，只看 VSYNC 会误判为"采集正常"。
-    //
-    // 每来一帧有效数据就翻转一次 alive_tog，同步到 clk_pix 域后检测翻转；
-    // 超过约 1 秒没有翻转 -> 认为摄像头没出图 -> 显示 FPGA 内部彩条。
-    // 这样"黑屏"这个现象被消除：看到彩条=显示通路好、问题在摄像头侧。
+    // 【为什么不看 VSYNC】上一版用 VSYNC 触发判据，结果 K17 悬空时的噪声
+    // 边沿让 LED2 亮、判据也"正常"，反而掩盖了故障。这里改成：
+    //   只要写进过非零像素，就认为出图了 —— 与 VSYNC 完全解耦。
+    // 计数器每 4096 个非零像素翻一次，同步到 clk_pix 域后检测翻转，
+    // 超过约 1 秒无翻转就显示自检面板，出图后立即切回。
     //======================================================================
-    reg wr_nz, alive_tog;
+    reg [15:0] px_cnt;
+    reg [15:0] pdiv;
+    reg        href_sticky;
+
     always @(posedge ov_pclk or negedge rst_n_pclk) begin
         if (!rst_n_pclk) begin
-            wr_nz     <= 1'b0;
-            alive_tog <= 1'b0;
+            px_cnt      <= 16'd0;
+            pdiv        <= 16'd0;
+            href_sticky <= 1'b0;
         end else begin
-            if (frame_start) begin
-                wr_nz <= 1'b0;                  // 新一帧开始，清空本帧标记
-                if (wr_nz) alive_tog <= ~alive_tog;  // 上一帧有非零像素
-            end else if (wr_en && (pix != 16'd0)) begin
-                wr_nz <= 1'b1;
-            end
+            if (wr_en && (pix != 16'd0)) px_cnt <= px_cnt + 16'd1;
+            pdiv <= pdiv + 16'd1;
+            if (ov_href) href_sticky <= 1'b1;
         end
     end
 
-    // 两级同步 + 边沿检测
-    reg tog_s1, tog_s2, tog_s3;
+    // 两个慢速翻转位：跨域同步时不会出现"每拍都变"的亚稳态问题
+    wire px_tog  = px_cnt[12];   // 每 4096 个非零像素翻一次
+    wire clk_tog = pdiv[13];     // 每 8192 个 PCLK 翻一次（约 146us @56MHz）
+
+    reg pt_s1, pt_s2;
+    reg ct_s1, ct_s2;
+    reg hs_s1, hs_s2;
+    reg vss_s1, vss_s2;
+
+    reg vs_seen;
+    always @(posedge ov_pclk or negedge rst_n_pclk) begin
+        if (!rst_n_pclk)      vs_seen <= 1'b0;
+        else if (frame_start) vs_seen <= 1'b1;
+    end
+
+    reg px_nz;
+    reg pclk_alive, href_alive;
+
     always @(posedge clk_pix or negedge rst_n_pix) begin
         if (!rst_n_pix) begin
-            tog_s1 <= 1'b0;
-            tog_s2 <= 1'b0;
-            tog_s3 <= 1'b0;
+            pt_s1 <= 1'b0; pt_s2 <= 1'b0;
+            ct_s1 <= 1'b0; ct_s2 <= 1'b0;
+            hs_s1 <= 1'b0; hs_s2 <= 1'b0;
+            vss_s1 <= 1'b0; vss_s2 <= 1'b0;
+            px_nz <= 1'b0;
+            pclk_alive <= 1'b0;
+            href_alive <= 1'b0;
         end else begin
-            tog_s1 <= alive_tog;
-            tog_s2 <= tog_s1;
-            tog_s3 <= tog_s2;
+            pt_s1  <= px_tog;      pt_s2  <= pt_s1;
+            ct_s1  <= clk_tog;     ct_s2  <= ct_s1;
+            hs_s1  <= href_sticky; hs_s2  <= hs_s1;
+            vss_s1 <= vs_seen;     vss_s2 <= vss_s1;
+
+            if (pt_s1 ^ pt_s2) px_nz      <= 1'b1;   // 有过非零像素
+            if (ct_s1 ^ ct_s2) pclk_alive <= 1'b1;   // PCLK 在跳
+            if (hs_s2)         href_alive <= 1'b1;
         end
     end
 
-    wire alive_evt = tog_s2 ^ tog_s3;       // 收到一帧有效数据（单拍）
+    wire alive_evt = pt_s1 ^ pt_s2;
 
     // 1 秒超时（25MHz）
     localparam [24:0] PAT_TO = 25'd25_000_000;
@@ -222,7 +318,7 @@ module ct_top (
     always @(posedge clk_pix or negedge rst_n_pix) begin
         if (!rst_n_pix) begin
             pat_cnt <= 25'd0;
-            pat_en  <= 1'b1;                // 上电先显示彩条，出图后自动切走
+            pat_en  <= 1'b1;                // 上电先显示自检面板，出图后自动切走
         end else if (alive_evt) begin
             pat_cnt <= 25'd0;
             pat_en  <= 1'b0;
@@ -233,11 +329,8 @@ module ct_top (
         end
     end
 
-
-
     //======================================================================
     // 帧缓存读侧 + VGA 时序（2x2 放大）
-    // BRAM 输出延迟 1 拍，de/hsync/vsync 同步延迟 1 拍以保持对齐
     //======================================================================
     wire [9:0] vx, vy;
     wire       de, hs, vs, sof;
@@ -283,7 +376,6 @@ module ct_top (
 
     //----------------------------------------------------------------------
     // 内部彩条：与摄像头完全无关，用来单独验证 VGA 显示通路
-    // 8 条 80 像素竖条（白/黄/青/绿/品红/红/蓝/黑），RGB565 直出
     //----------------------------------------------------------------------
     reg [15:0] pat_col;
     always @* begin
@@ -297,25 +389,53 @@ module ct_top (
         else                   pat_col = 16'h0000;   // 黑
     end
 
-    reg [15:0] pat_col_d;
+    //----------------------------------------------------------------------
+    // 自检面板叠加（只在没有画面时出现，覆盖彩条上部）
+    //----------------------------------------------------------------------
+    wire [15:0] dg_col;
+    wire        dg_en;
+
+    diag_osd u_diag (
+        .vx         (vx),
+        .vy         (vy),
+        .v_pidh     (v_pidh),
+        .v_pidl     (v_pidl),
+        .v_pad      (v_pad),
+        .v_pwr      (v_pwr),
+        .ok         (rb_ok),
+        .fin        (rb_fin),
+        .bad        (rb_bad),
+        .pclk_alive (pclk_alive),
+        .href_alive (href_alive),
+        .vs_seen    (vss_s2),
+        .px_nz      (px_nz),
+        .col        (dg_col),
+        .en         (dg_en)
+    );
+
+    // BRAM 输出延迟 1 拍，所有叠加源同样延迟 1 拍以保持对齐
+    reg [15:0] pat_col_d, dg_col_d;
+    reg        dg_en_d;
     always @(posedge clk_pix or negedge rst_n_pix) begin
-        if (!rst_n_pix) pat_col_d <= 16'd0;
-        else            pat_col_d <= pat_col;
+        if (!rst_n_pix) begin
+            pat_col_d <= 16'd0;
+            dg_col_d  <= 16'd0;
+            dg_en_d   <= 1'b0;
+        end else begin
+            pat_col_d <= pat_col;
+            dg_col_d  <= dg_col;
+            dg_en_d   <= dg_en;
+        end
     end
 
-    assign vga_data  = de_d ? (pat_en ? pat_col_d : fb_dout) : 16'h0000;
+    assign vga_data  = de_d ? (pat_en ? (dg_en_d ? dg_col_d : pat_col_d) : fb_dout)
+                            : 16'h0000;
     assign vga_hsync = hs_d;
     assign vga_vsync = vs_d;
 
     //======================================================================
     // LED 自检
     //======================================================================
-    reg vs_seen;
-    always @(posedge ov_pclk or negedge rst_n_pclk) begin
-        if (!rst_n_pclk)          vs_seen <= 1'b0;
-        else if (frame_start)     vs_seen <= 1'b1;
-    end
-
     assign led_n[0] = ~locked;
     assign led_n[1] = ~cfg_done;
     assign led_n[2] = ~vs_seen;

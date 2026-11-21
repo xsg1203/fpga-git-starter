@@ -57,6 +57,17 @@ set_property -dict {PACKAGE_PIN H16 IOSTANDARD LVCMOS33} [get_ports ov_pwdn]
 set_property -dict {PACKAGE_PIN J18 IOSTANDARD LVCMOS33} [get_ports ov_scl]
 set_property -dict {PACKAGE_PIN G20 IOSTANDARD LVCMOS33} [get_ports ov_sda]
 
+# 【关键】SCCB 是开漏总线：主机只会把线拉低，靠上拉回高。
+# 教学扩展板的摄像头排针对 SCL/SDA 未必带上拉电阻；若整条线上没有上拉，
+# SCL 永远回不到高电平 -> 从机收不到任何时钟 -> 寄存器一条都写不进去。
+# 更糟的是 SDA 恒为低时，主机在每个 ACK 槽读到的都是 0，看起来"全部 ACK 成功"，
+# 于是错误被完全掩盖（表现为灯全对、屏幕全黑/纯彩条）。
+# 这里打开 FPGA 内部弱上拉（约 20kΩ）作为兜底；SCCB 已放慢到约 97.6kHz 以适配慢上升沿。
+set_property PULLUP true [get_ports {ov_scl ov_sda}]
+
+# SDA 是异步输入（只在 SCCB 位槽内被采样），与 clk50 无固定相位关系
+set_false_path -from [get_ports ov_sda]
+
 # 像素时钟来自摄像头，走的是普通 IO（E19），必须关闭专用时钟布线检查。
 #
 # 【周期取值说明】不是拍脑袋的 40ns。OV5640 在 0x3035=0x11 / 0x3036=0x69 / XCLK 24MHz
