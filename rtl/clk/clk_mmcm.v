@@ -66,6 +66,10 @@ module clk_mmcm (
         .CLKOUT3B  (),
         .CLKOUT4   (),
         .CLKOUT5   (),
+        // CLKOUT6 也要显式留空：MMCME2_BASE 共 18 个端口，
+        // 之前漏接它，综合报 "requires 18 connections, but only 17 given"。
+        // 注意 MMCME2_BASE 没有 CLKINSEL（那是 MMCME2_ADV 的端口），不要加。
+        .CLKOUT6   (),
         .LOCKED    (locked),
         .PWRDWN    (1'b0),
         .RST       (rst)

@@ -18,11 +18,25 @@ set root_dir   [file normalize [file join $script_dir ..]]
 set out_dir    [file join $root_dir build_flat]
 file mkdir $out_dir
 
-# ---- 读源码：rtl/*.v + rtl/<子目录>/*.v ----
-set rtl_files [concat \
-    [glob -nocomplain [file join $root_dir rtl *.v]] \
-    [glob -nocomplain [file join $root_dir rtl * *.v]] ]
+# ---- 读源码：递归收集 rtl/ 下所有 .v ----
+# 递归而非固定两层：深层目录被漏掉时，症状是 "module 'xxx' not found"，
+# 与真正的代码错误混在一起很难区分。清单照例打印出来。
+proc ct_collect_v {dir} {
+    set out {}
+    foreach f [glob -nocomplain -directory $dir -types f *.v] {
+        lappend out [file normalize $f]
+    }
+    foreach d [glob -nocomplain -directory $dir -types d *] {
+        set out [concat $out [ct_collect_v $d]]
+    }
+    return $out
+}
+
+set rtl_files [ct_collect_v [file join $root_dir rtl]]
 puts "==== RTL files: [llength $rtl_files] ===="
+foreach f $rtl_files {
+    puts "  [string range $f [expr {[string length $root_dir] + 1}] end]"
+}
 read_verilog $rtl_files
 
 # ---- 读约束（综合前读，opt/place 阶段自动生效）----

@@ -19,8 +19,20 @@ docs/       需求规格书、架构、接口表、测试报告
 rtl/        RTL 源码（按 ov5640 / imgproc / video / ctrl 分层）
 sim/        testbench 与图像激励
 constr/     XDC 约束
-scripts/    建工程、综合、仿真脚本
+scripts/    建工程、综合、仿真、刷新工程脚本
 ```
+
+### 常用脚本
+
+| 脚本 | 用途 |
+| --- | --- |
+| `scripts/create_project.tcl` | 从零建 `build/ct_ebaz4205.xpr`（会覆盖旧工程） |
+| `scripts/refresh_fileset.tcl` | **新增 RTL 后刷新已打开工程的**文件列表，不用关 Vivado |
+| `scripts/build_flat.tcl` | 无头全流程（源码→综合→实现→bit），不依赖 `.xpr` |
+| `scripts/push.sh` | 推送到 GitHub（默认 SSH） |
+
+> 往 `rtl/` 里加了新模块后，**必须**执行 `refresh_fileset.tcl` 或在 GUI 里
+> `Add Sources`，否则综合会报 `module 'xxx' not found`。见 [03 §6](docs/03_上板调试记录.md)。
 
 ## 文档
 

@@ -14,10 +14,28 @@ set part_name "xc7z010clg400-1"
 create_project $proj_name $proj_dir -part $part_name -force
 set_property target_language Verilog [current_project]
 
-# RTL：rtl/*.v + rtl/<子目录>/*.v
-set rtl_files [concat \
-    [glob -nocomplain [file join $root_dir rtl *.v]] \
-    [glob -nocomplain [file join $root_dir rtl * *.v]] ]
+# RTL：递归收集 rtl/ 下所有 .v
+#
+# 原来写的是 glob rtl/*.v + rtl/*/*.v（只到一层）。改成递归 proc：
+#   - 深一层目录会被静默漏掉，而漏掉的表现是综合阶段
+#     "ERROR: [Synth 8-439] module 'xxx' not found"，极易误判成代码问题；
+#   - 顺手把每个文件的相对路径打印出来，出问题时一眼能看出漏了哪个。
+proc ct_collect_v {dir} {
+    set out {}
+    foreach f [glob -nocomplain -directory $dir -types f *.v] {
+        lappend out [file normalize $f]
+    }
+    foreach d [glob -nocomplain -directory $dir -types d *] {
+        set out [concat $out [ct_collect_v $d]]
+    }
+    return $out
+}
+
+set rtl_files [ct_collect_v [file join $root_dir rtl]]
+puts "==== RTL list ([llength $rtl_files]) ===="
+foreach f $rtl_files {
+    puts "  [string range $f [expr {[string length $root_dir] + 1}] end]"
+}
 add_files -norecurse $rtl_files
 
 add_files -fileset constrs_1 -norecurse [file join $root_dir constr ebaz4205.xdc]
