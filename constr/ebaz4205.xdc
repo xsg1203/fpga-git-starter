@@ -59,12 +59,12 @@ set_property -dict {PACKAGE_PIN G20 IOSTANDARD LVCMOS33} [get_ports ov_sda]
 
 # 像素时钟来自摄像头，走的是普通 IO（E19），必须关闭专用时钟布线检查。
 #
-# 【周期取值说明】不是拍脑袋的 40ns。OV5640 在 0x3035=0x21 / 0x3036=0x69 / XCLK 24MHz
+# 【周期取值说明】不是拍脑袋的 40ns。OV5640 在 0x3035=0x11 / 0x3036=0x69 / XCLK 24MHz
 # 下，PCLK 由 HTS x VTS x 帧率推出：1896 x 984 x 30fps ≈ 56MHz（周期 17.86ns）。
 # 若仍按 25MHz(40ns) 约束，工具会以为有 40ns 余量，实际只有 17.86ns ——
 #   采集寄存器一旦在真实硅片上违例，画面就是"黑屏/错位"，而报告却是全绿。
-# 这里按 50MHz(20ns) 约束：留 12% 余量便于布通，同时让 WNS 具备参考意义。
-create_clock -period 20.000 -name ov_pclk [get_ports ov_pclk]
+# 这里按 17.857ns(56MHz) 精确约束：宁可比实际略紧，也不允许报告虚假全绿。
+create_clock -period 17.857 -name ov_pclk [get_ports ov_pclk]
 
 # CLOCK_DEDICATED_ROUTE 必须落在真实存在的 net 上。
 # 注意两点：
@@ -81,6 +81,28 @@ set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets -quiet ov_pclk]
 # 改为 8/1 后才能真正评估采集寄存器能否在 56MHz 下稳定采样。
 set_input_delay -clock ov_pclk -max 8.000 [get_ports {ov_data[*] ov_href ov_vsync}]
 set_input_delay -clock ov_pclk -min 1.000 [get_ports {ov_data[*] ov_href ov_vsync}]
+
+#---------------------------------------------------------------------------
+# 跨时钟域声明：ov_pclk（摄像头） 与 clk_pix（VGA/帧缓存读） 之间无同步时序关系
+#
+# 两条穿越路径都是刻意做成异步的：
+#   1) alive_tog：单比特电平，pclk 域每帧翻转一次，pix 域两级同步后取沿；
+#   2) frame_buf：真双口 BRAM，写在 pclk、读在 pix，两侧独立寻址，无组合穿越。
+#
+# 不声明时工具按同步路径分析：两个周期 17.857ns / 40ns 会让边沿周期性几乎重合，
+# 要求时间被压到 ~0.008ns，必然报违例 —— 这是假违例（实测 3 条全属此类，
+# 而同域内 WNS 分别是 clk50 +12.655 / clk_pix +30.176 / ov_pclk +6.058）。
+#---------------------------------------------------------------------------
+set_clock_groups -asynchronous -group [get_clocks -of_objects [get_pins u_clk/u_mmcm/CLKOUT1]] -group [get_clocks ov_pclk]
+
+#---------------------------------------------------------------------------
+# 异步复位路径：各时钟域的复位同步器（rst_sync / por_reset）的 CLR 端由
+# clk50 域驱动的 arst 异步清零。这条路径的 recovery/removal 由同步器结构本身
+# 保证（复位释放后再过两级 FF 才有效），不是需要收敛的同步时序路径。
+# 不声明时工具会按 recovery 检查：clk50(20ns) 与 ov_pclk(17.857ns) 边沿逐渐
+# 错开，要求时间被压到 0.571ns，实测 data path 2.693ns -> 报 -2.709ns 违例。
+#---------------------------------------------------------------------------
+set_false_path -to [get_pins -hierarchical -filter {REF_PIN_NAME == CLR}]
 
 #---------------------------------------------------------------------------
 # VGA（电阻网络 DAC，RGB565）
