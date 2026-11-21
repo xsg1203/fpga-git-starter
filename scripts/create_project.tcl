@@ -25,5 +25,8 @@ add_files -fileset constrs_1 -norecurse [file join $root_dir constr ebaz4205.xdc
 set_property top ct_top [current_fileset]
 update_compile_order -fileset sources_1
 
-puts "==== 工程已创建: $proj_dir/$proj_name.xpr ===="
-puts "==== RTL 文件数: [llength $rtl_files] ===="
+# 注意：以下两条 puts 刻意用纯 ASCII。
+# Vivado 2017.4 在 Windows 批处理模式下按非 UTF-8 解析 Tcl 输出，中文会显示成
+# "å·¥ç¨‹" 这类乱码，影响看日志。源码注释保留中文不影响执行。
+puts "==== Project created: $proj_dir/$proj_name.xpr ===="
+puts "==== RTL files: [llength $rtl_files] ===="
