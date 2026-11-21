@@ -136,12 +136,12 @@ module tb_ov5640_cfg;
         wait (cfg_done);
         repeat (10) @(posedge clk);
 
-        $display("[T] 写入总条数 = %0d (期望 95)", n);
+        $display("[T] 写入总条数 = %0d (期望 96)", n);
         $display("[T] 首条 = %04h = %02h (期望 3103=03)", first_addr, first_dat);
-        $display("[T] 末条 = %04h = %02h (期望 3008=02)", last_addr, last_dat);
+        $display("[T] 末条 = %04h = %02h (期望 4202=00)", last_addr, last_dat);
         $display("[T] err_cnt = %0d (期望 0)", err_cnt);
 
-        if (n != 95) begin
+        if (n != 96) begin
             $display("  FAIL  条数不符");
             fail = fail + 1;
         end
@@ -153,6 +153,9 @@ module tb_ov5640_cfg;
         // ---- 语义检查 ----
         $display("[T] --- 结构 ---");
         chk(16'h3008, 8'h02);          // 末条必须进入出图（bit6=0）
+        // 0x4202 是流开关，0x00 才是开流。这张表以前一条都没写过它，
+        // 若复位默认是 0x0F（暂停），现象就是"HREF 从来不高、像素全 0"。
+        chk(16'h4202, 8'h00);
 
         $display("[T] --- DVP 引脚方向（本次黑屏根因）---");
         chkm(16'h3017, 8'hF0, 8'hF0);  // VSYNC/HREF/PCLK/D[9:6] 必须全是输出

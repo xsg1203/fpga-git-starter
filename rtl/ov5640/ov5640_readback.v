@@ -78,8 +78,12 @@ module ov5640_readback (
 
             case (st)
             S_IDLE: begin
-                fin <= 1'b0;
+                // fin 必须"粘住"：OSD 每帧现采这个信号，单拍脉冲是采不到的。
+                // 原写法 S_FIN 里置 1、下一拍 S_IDLE 又清 0，等于 1 个 100MHz 周期的
+                // 脉冲 —— 屏幕上那个"SCCB 自检"块会永远显示黄色（未完成），
+                // 而实际上四次回读早就全部成功了。只在收到新的 start 时才清。
                 if (start) begin
+                    fin   <= 1'b0;
                     idx   <= 2'd0;
                     ok    <= 4'd0;
                     bad   <= 1'b0;

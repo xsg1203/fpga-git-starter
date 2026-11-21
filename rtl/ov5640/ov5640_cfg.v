@@ -196,8 +196,14 @@ module ov5640_cfg (
 
             //===== 14. 开始输出图像 =====
             9'd95 : cfg_rom = {16'h3008, 8'h02};   // bit6=0 退出 power down
+            // 0x4202 是"流开关"：0x00 = 开流，0x0F = 暂停。
+            // 这张表以前一条都没写过它 —— 如果复位后的默认值是 0x0F，
+            // 传感器就会"寄存器全对、PCLK 在跑，但一行数据都不输出"，
+            // 表现恰好是"HREF 从来没有高电平、像素全 0"。
+            // 已经是 0x00 时写 0x00 是空操作，所以这条没有副作用。
+            9'd96 : cfg_rom = {16'h4202, 8'h00};   // 开流
 
-            9'd96 : cfg_rom = END_CODE;
+            9'd97 : cfg_rom = END_CODE;
             default: cfg_rom = END_CODE;
             endcase
         end
