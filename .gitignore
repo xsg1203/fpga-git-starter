@@ -1,4 +1,6 @@
 # Vivado / ISE
+# 整个 build/ 是工程产物目录，由 scripts/create_project.tcl 随时重建，不入库
+build/
 *.jou
 *.log
 *.str
