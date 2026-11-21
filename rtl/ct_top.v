@@ -13,6 +13,13 @@
 //   LED1 亮 = OV5640 SCCB 配置完成
 //   LED2 亮 = 已收到 VSYNC（摄像头正在出图）
 //   LED3 亮 = SCCB 出现过无 ACK（应保持熄灭）
+//
+// 【M2 显示策略】画面内容有三种可能，用来把"黑屏"拆成可判定状态：
+//   1) 出摄像头实时画面                -> 采集链路与显示链路都正常
+//   2) FPGA 内部彩条 + LED2 灭         -> 没有 VSYNC：XCLK/供电/复位/SCCB 失败
+//   3) FPGA 内部彩条 + LED2 亮         -> 有同步但无有效像素：窗口/格式/曝光配置错
+//   彩条在"连续 1 秒没有写进非零像素"时自动接管，出图后立即切回摄像头。
+//   所以上板再也不会只看到纯黑：至少能立刻知道问题在摄像头侧还是显示侧。
 //==========================================================================
 `timescale 1ns / 1ps
 
@@ -41,7 +48,7 @@ module ct_top (
     //======================================================================
     // 时钟与复位
     //======================================================================
-    wire clk_sys, clk_pix, locked;
+    wire clk_sys, clk_pix, clk_xclk, locked;
 
     reg  por_rst;
     reg  [15:0] por_cnt;
@@ -61,6 +68,7 @@ module ct_top (
         .rst     (por_rst),
         .clk_sys (clk_sys),
         .clk_pix (clk_pix),
+        .clk_xclk(clk_xclk),
         .locked  (locked)
     );
 
@@ -131,7 +139,7 @@ module ct_top (
 
     assign ov_scl  = scl_lo ? 1'b0 : 1'bz;
     assign ov_sda  = sda_lo ? 1'b0 : 1'bz;
-    assign ov_xclk = clk_pix;        // 25MHz（OV5640 支持 6~27MHz）
+    assign ov_xclk = clk_xclk;       // 24MHz（硬件说明 F20 标注 24MHz）
     assign ov_rst_n = rst_n50;
     assign ov_pwdn  = 1'b0;
 
@@ -162,6 +170,70 @@ module ct_top (
     wire [8:0]  wrow = cy[9:1];
     wire [8:0]  wcol = cx[9:1];
     wire [17:0] wr_addr18 = ({9'd0, wrow} << 8) + ({9'd0, wrow} << 6) + {9'd0, wcol};
+
+    //======================================================================
+    // 摄像头"真的在出图"的判定（pclk 域 -> clk_pix 域）
+    //
+    // 判据不是"收到 VSYNC"，而是"这一帧里写进了非零像素"。
+    // 原因是 VSYNC 正常但像素全 0 也是一种典型故障（曝光上限被压低、
+    // 输出格式错），此时屏幕同样是黑的，只看 VSYNC 会误判为"采集正常"。
+    //
+    // 每来一帧有效数据就翻转一次 alive_tog，同步到 clk_pix 域后检测翻转；
+    // 超过约 1 秒没有翻转 -> 认为摄像头没出图 -> 显示 FPGA 内部彩条。
+    // 这样"黑屏"这个现象被消除：看到彩条=显示通路好、问题在摄像头侧。
+    //======================================================================
+    reg wr_nz, alive_tog;
+    always @(posedge ov_pclk or negedge rst_n_pclk) begin
+        if (!rst_n_pclk) begin
+            wr_nz     <= 1'b0;
+            alive_tog <= 1'b0;
+        end else begin
+            if (frame_start) begin
+                wr_nz <= 1'b0;                  // 新一帧开始，清空本帧标记
+                if (wr_nz) alive_tog <= ~alive_tog;  // 上一帧有非零像素
+            end else if (wr_en && (pix != 16'd0)) begin
+                wr_nz <= 1'b1;
+            end
+        end
+    end
+
+    // 两级同步 + 边沿检测
+    reg tog_s1, tog_s2, tog_s3;
+    always @(posedge clk_pix or negedge rst_n_pix) begin
+        if (!rst_n_pix) begin
+            tog_s1 <= 1'b0;
+            tog_s2 <= 1'b0;
+            tog_s3 <= 1'b0;
+        end else begin
+            tog_s1 <= alive_tog;
+            tog_s2 <= tog_s1;
+            tog_s3 <= tog_s2;
+        end
+    end
+
+    wire alive_evt = tog_s2 ^ tog_s3;       // 收到一帧有效数据（单拍）
+
+    // 1 秒超时（25MHz）
+    localparam [24:0] PAT_TO = 25'd25_000_000;
+
+    reg [24:0] pat_cnt;
+    reg        pat_en;
+
+    always @(posedge clk_pix or negedge rst_n_pix) begin
+        if (!rst_n_pix) begin
+            pat_cnt <= 25'd0;
+            pat_en  <= 1'b1;                // 上电先显示彩条，出图后自动切走
+        end else if (alive_evt) begin
+            pat_cnt <= 25'd0;
+            pat_en  <= 1'b0;
+        end else if (pat_cnt != PAT_TO) begin
+            pat_cnt <= pat_cnt + 25'd1;
+        end else begin
+            pat_en  <= 1'b1;
+        end
+    end
+
+
 
     //======================================================================
     // 帧缓存读侧 + VGA 时序（2x2 放大）
@@ -209,7 +281,29 @@ module ct_top (
         end
     end
 
-    assign vga_data  = de_d ? fb_dout : 16'h0000;
+    //----------------------------------------------------------------------
+    // 内部彩条：与摄像头完全无关，用来单独验证 VGA 显示通路
+    // 8 条 80 像素竖条（白/黄/青/绿/品红/红/蓝/黑），RGB565 直出
+    //----------------------------------------------------------------------
+    reg [15:0] pat_col;
+    always @* begin
+        if      (vx < 10'd80)  pat_col = 16'hFFFF;   // 白
+        else if (vx < 10'd160) pat_col = 16'hFFE0;   // 黄
+        else if (vx < 10'd240) pat_col = 16'h07FF;   // 青
+        else if (vx < 10'd320) pat_col = 16'h07E0;   // 绿
+        else if (vx < 10'd400) pat_col = 16'hF81F;   // 品红
+        else if (vx < 10'd480) pat_col = 16'hF800;   // 红
+        else if (vx < 10'd560) pat_col = 16'h001F;   // 蓝
+        else                   pat_col = 16'h0000;   // 黑
+    end
+
+    reg [15:0] pat_col_d;
+    always @(posedge clk_pix or negedge rst_n_pix) begin
+        if (!rst_n_pix) pat_col_d <= 16'd0;
+        else            pat_col_d <= pat_col;
+    end
+
+    assign vga_data  = de_d ? (pat_en ? pat_col_d : fb_dout) : 16'h0000;
     assign vga_hsync = hs_d;
     assign vga_vsync = vs_d;
 

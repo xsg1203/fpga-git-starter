@@ -57,8 +57,14 @@ set_property -dict {PACKAGE_PIN H16 IOSTANDARD LVCMOS33} [get_ports ov_pwdn]
 set_property -dict {PACKAGE_PIN J18 IOSTANDARD LVCMOS33} [get_ports ov_scl]
 set_property -dict {PACKAGE_PIN G20 IOSTANDARD LVCMOS33} [get_ports ov_sda]
 
-# 像素时钟来自摄像头，走的是普通 IO（E19），必须关闭专用时钟布线检查
-create_clock -period 40.000 -name ov_pclk [get_ports ov_pclk]
+# 像素时钟来自摄像头，走的是普通 IO（E19），必须关闭专用时钟布线检查。
+#
+# 【周期取值说明】不是拍脑袋的 40ns。OV5640 在 0x3035=0x21 / 0x3036=0x69 / XCLK 24MHz
+# 下，PCLK 由 HTS x VTS x 帧率推出：1896 x 984 x 30fps ≈ 56MHz（周期 17.86ns）。
+# 若仍按 25MHz(40ns) 约束，工具会以为有 40ns 余量，实际只有 17.86ns ——
+#   采集寄存器一旦在真实硅片上违例，画面就是"黑屏/错位"，而报告却是全绿。
+# 这里按 50MHz(20ns) 约束：留 12% 余量便于布通，同时让 WNS 具备参考意义。
+create_clock -period 20.000 -name ov_pclk [get_ports ov_pclk]
 
 # CLOCK_DEDICATED_ROUTE 必须落在真实存在的 net 上。
 # 注意两点：
@@ -70,9 +76,11 @@ create_clock -period 40.000 -name ov_pclk [get_ports ov_pclk]
 set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets -quiet ov_pclk_IBUF]
 set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets -quiet ov_pclk]
 
-# DVP 数据相对 PCLK 的输入延迟（M2 先给保守值，Phase 3 按实测 PCLK 细化）
-set_input_delay -clock ov_pclk -max 10.000 [get_ports {ov_data[*] ov_href ov_vsync}]
-set_input_delay -clock ov_pclk -min  2.000 [get_ports {ov_data[*] ov_href ov_vsync}]
+# DVP 数据相对 PCLK 的输入延迟：OV5640 手册 t_PCLK->data 典型 5ns、最大 8ns。
+# 原先给 10ns 在 20ns 周期下几乎吃掉一半预算，属于无效约束；
+# 改为 8/1 后才能真正评估采集寄存器能否在 56MHz 下稳定采样。
+set_input_delay -clock ov_pclk -max 8.000 [get_ports {ov_data[*] ov_href ov_vsync}]
+set_input_delay -clock ov_pclk -min 1.000 [get_ports {ov_data[*] ov_href ov_vsync}]
 
 #---------------------------------------------------------------------------
 # VGA（电阻网络 DAC，RGB565）
