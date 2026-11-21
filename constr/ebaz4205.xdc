@@ -59,7 +59,16 @@ set_property -dict {PACKAGE_PIN G20 IOSTANDARD LVCMOS33} [get_ports ov_sda]
 
 # 像素时钟来自摄像头，走的是普通 IO（E19），必须关闭专用时钟布线检查
 create_clock -period 40.000 -name ov_pclk [get_ports ov_pclk]
-set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets ov_pclk_IBUF]
+
+# CLOCK_DEDICATED_ROUTE 必须落在真实存在的 net 上。
+# 注意两点：
+#  1) XDC 不支持 if/foreach 等控制流（会报 Designutils 20-1307 并让整份约束失效），
+#     所以这里只能用两条独立命令，不能做条件判断。
+#  2) 综合阶段 IBUF 尚未生成，第一条命令会报
+#     CRITICAL WARNING 'set_property' expects at least one object —— 这是"预期噪声"：
+#     该属性在 opt/place 阶段才会真正落到 ov_pclk_IBUF 上，place 不报 30-574 错误即证明生效。
+set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets -quiet ov_pclk_IBUF]
+set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets -quiet ov_pclk]
 
 # DVP 数据相对 PCLK 的输入延迟（M2 先给保守值，Phase 3 按实测 PCLK 细化）
 set_input_delay -clock ov_pclk -max 10.000 [get_ports {ov_data[*] ov_href ov_vsync}]
@@ -91,8 +100,13 @@ set_property -dict {PACKAGE_PIN M19 IOSTANDARD LVCMOS33} [get_ports {vga_data[0]
 set_property -dict {PACKAGE_PIN U20 IOSTANDARD LVCMOS33} [get_ports vga_hsync]
 set_property -dict {PACKAGE_PIN V20 IOSTANDARD LVCMOS33} [get_ports vga_vsync]
 
-# 纯组合驱动到引脚，无外部采样时钟，输出侧不建时序关系
-set_false_path -from [get_clocks clk_pix] -to [get_ports {vga_data[*] vga_hsync vga_vsync}]
+# 纯组合驱动到引脚，无外部采样时钟，输出侧不建时序关系。
+# 注意：clk_pix 由 MMCM 自动派生，时钟对象名不是 "clk_pix"（实际是 clk_pix_raw），
+# 原来写 [get_clocks clk_pix] 会报 No valid object(s) 并静默失效，这条约束等于没写。
+# 改为从 MMCM 输出引脚反查时钟对象，不依赖自动命名的具体字符串。
+# XDC 不支持 if 控制流，故直接写单条命令。
+set_false_path -from [get_clocks -of_objects [get_pins u_clk/u_mmcm/CLKOUT1]] \
+               -to   [get_ports {vga_data[*] vga_hsync vga_vsync}]
 set_false_path -from [get_ports {key_n[*]}]
 set_false_path -to   [get_ports {led_n[*] ov_xclk ov_rst_n ov_pwdn}]
 

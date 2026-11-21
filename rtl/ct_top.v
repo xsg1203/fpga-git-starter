@@ -97,7 +97,8 @@ module ct_top (
     //======================================================================
     wire       sccb_go, sccb_busy, sccb_done, sccb_ackerr;
     wire       scl_lo, sda_lo;
-    wire [7:0] cfg_reg, cfg_dat, cfg_err_cnt;
+    wire [15:0] cfg_reg;                  // OV5640 寄存器地址为 16 位
+    wire [7:0]  cfg_dat, cfg_err_cnt;
     wire       cfg_done;
 
     i2c_sccb #(.DIV(8'd64)) u_sccb (
